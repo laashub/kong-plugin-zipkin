@@ -2,6 +2,8 @@ local tracing_headers = require "kong.plugins.zipkin.tracing_headers"
 
 local to_hex = require "resty.string".to_hex
 
+local table_merge = require "kong.tools.utils".table_merge
+
 local fmt  = string.format
 
 local function to_hex_ids(arr)
@@ -301,67 +303,166 @@ describe("tracing_headers.parse", function()
       end)
     end)
   end)
+end)
 
-  describe("tracing_headers.set", function()
-    local nop = function() end
-    _G.kong = {
-      service = {
-        request = {},
-      },
+describe("tracing_headers.set", function()
+  local nop = function() end
+
+  local headers
+  local warnings
+
+  _G.kong = {
+    service = {
       request = {
-        get_header = nop,
+        set_header = function(name, value)
+          headers[name] = value
+        end,
       },
-    }
-
-    local headers
-    before_each(function()
-      headers = {}
-      kong.service.request.set_header = function(name, value)
-        headers[name] = value
+    },
+    request = {
+      get_header = nop,
+    },
+    log = {
+      warn = function(msg)
+        warnings[#warnings + 1] = msg
       end
-    end)
-
-    local proxy_span = {
-      trace_id = from_hex(trace_id),
-      span_id = from_hex(span_id),
-      parent_id = from_hex(parent_id),
-      should_sample = true,
-      each_baggage_item = function() return nop end,
     }
+  }
 
-    it("sets b3 headers when header_type is b3", function()
-      set("b3", proxy_span)
-      assert.same({
-        ["x-b3-traceid"] = trace_id,
-        ["x-b3-spanid"] = span_id,
-        ["x-b3-parentspanid"] = parent_id,
-        ["x-b3-sampled"] = "1"
-      }, headers)
+  local proxy_span = {
+    trace_id = from_hex(trace_id),
+    span_id = from_hex(span_id),
+    parent_id = from_hex(parent_id),
+    should_sample = true,
+    each_baggage_item = function() return nop end,
+  }
+
+  local b3_headers = {
+    ["x-b3-traceid"] = trace_id,
+    ["x-b3-spanid"] = span_id,
+    ["x-b3-parentspanid"] = parent_id,
+    ["x-b3-sampled"] = "1"
+  }
+
+  local b3_single_headers = {
+    b3 = fmt("%s-%s-1-%s", trace_id, span_id, parent_id)
+  }
+
+  local w3c_headers = {
+    traceparent = fmt("00-%s-%s-01", trace_id, span_id)
+  }
+
+  before_each(function()
+    headers = {}
+    warnings = {}
+  end)
+
+  describe("conf.header_type = 'preserve'", function()
+    it("sets headers according to their found state when conf.header_type = preserve", function()
+      set("preserve", "b3", proxy_span)
+      assert.same(b3_headers, headers)
+
+      headers = {}
+
+      set("preserve", nil, proxy_span)
+      assert.same(b3_headers, headers)
+
+      headers = {}
+
+      set("preserve", "b3-single", proxy_span)
+      assert.same(b3_single_headers, headers)
+
+      headers = {}
+
+      set("preserve", "w3c", proxy_span)
+      assert.same(w3c_headers, headers)
+
+      assert.same({}, warnings)
+    end)
+  end)
+
+  describe("conf.header_type = 'b3'", function()
+    it("sets headers to b3 when conf.header_type = b3", function()
+      set("b3", "b3", proxy_span)
+      assert.same(b3_headers, headers)
+
+      headers = {}
+
+      set("b3", nil, proxy_span)
+      assert.same(b3_headers, headers)
+
+      assert.same({}, warnings)
     end)
 
-    it("sets b3 headers when header_type is nil", function()
-      set(nil, proxy_span)
-      assert.same({
-        ["x-b3-traceid"] = trace_id,
-        ["x-b3-spanid"] = span_id,
-        ["x-b3-parentspanid"] = parent_id,
-        ["x-b3-sampled"] = "1"
-      }, headers)
+    it("sets both the b3 and b3-single headers when a b3-single header is encountered.", function()
+      set("b3", "b3-single", proxy_span)
+      assert.same(table_merge(b3_headers, b3_single_headers), headers)
+
+      -- but it generates a warning
+      assert.equals(1, #warnings)
+      assert.matches("Mismatched header types", warnings[1])
     end)
 
-    it("sets b3-single header when header_type is b3-sinpgle", function()
-      set("b3-single", proxy_span)
-      assert.same({
-        b3 = fmt("%s-%s-1-%s", trace_id, span_id, parent_id)
-      }, headers)
+    it("sets both the b3 and w3c headers when a w3c header is encountered.", function()
+      set("b3", "w3c", proxy_span)
+      assert.same(table_merge(b3_headers, w3c_headers), headers)
+
+      -- but it generates a warning
+      assert.equals(1, #warnings)
+      assert.matches("Mismatched header types", warnings[1])
+    end)
+  end)
+
+  describe("conf.header_type = 'b3-single'", function()
+    it("sets headers to b3-single when conf.header_type = b3-single", function()
+      set("b3-single", "b3-single", proxy_span)
+      assert.same(b3_single_headers, headers)
+      assert.same({}, warnings)
     end)
 
-    it("sets w3c header when header_type is w3c", function()
-      set("w3c", proxy_span)
-      assert.same({
-        traceparent = fmt("00-%s-%s-01", trace_id, span_id)
-      }, headers)
+    it("sets both the b3 and b3-single headers when a b3 header is encountered.", function()
+      set("b3-single", "b3", proxy_span)
+      assert.same(table_merge(b3_headers, b3_single_headers), headers)
+
+      -- but it generates a warning
+      assert.equals(1, #warnings)
+      assert.matches("Mismatched header types", warnings[1])
     end)
 
+    it("sets both the b3 and w3c headers when a w3c header is encountered.", function()
+      set("b3-single", "w3c", proxy_span)
+      assert.same(table_merge(b3_single_headers, w3c_headers), headers)
+
+      -- but it generates a warning
+      assert.equals(1, #warnings)
+      assert.matches("Mismatched header types", warnings[1])
+    end)
+  end)
+
+  describe("conf.header_type = 'w3c'", function()
+    it("sets headers to w3c when conf.header_type = w3c", function()
+      set("w3c", "w3c", proxy_span)
+      assert.same(w3c_headers, headers)
+      assert.same({}, warnings)
+    end)
+
+    it("sets both the b3 and w3c headers when a w3c header is encountered.", function()
+      set("w3c", "b3", proxy_span)
+      assert.same(table_merge(b3_headers, w3c_headers), headers)
+
+      -- but it generates a warning
+      assert.equals(1, #warnings)
+      assert.matches("Mismatched header types", warnings[1])
+    end)
+
+    it("sets both the b3-single and w3c headers when a b3-single header is encountered.", function()
+      set("w3c", "b3-single", proxy_span)
+      assert.same(table_merge(b3_single_headers, w3c_headers), headers)
+
+      -- but it generates a warning
+      assert.equals(1, #warnings)
+      assert.matches("Mismatched header types", warnings[1])
+    end)
   end)
 end)
+

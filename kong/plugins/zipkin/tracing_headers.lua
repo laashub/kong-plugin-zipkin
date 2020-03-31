@@ -273,10 +273,20 @@ local function parse(headers)
 end
 
 
-local function set(header_type, proxy_span)
+local function set(conf_header_type, found_header_type, proxy_span)
   local set_header = kong.service.request.set_header
 
-  if header_type == nil or header_type == "b3" then
+  if conf_header_type ~= "preserve" and
+     found_header_type ~= nil and
+     conf_header_type ~= found_header_type
+  then
+    kong.log.warn("Mismatched header types. conf: " .. conf_header_type .. ". found: " .. found_header_type)
+  end
+
+  if conf_header_type == "b3"
+  or found_header_type == nil
+  or found_header_type == "b3"
+  then
     set_header("x-b3-traceid", to_hex(proxy_span.trace_id))
     set_header("x-b3-spanid", to_hex(proxy_span.span_id))
     if proxy_span.parent_id then
@@ -288,15 +298,17 @@ local function set(header_type, proxy_span)
     else
       set_header("x-b3-sampled", proxy_span.should_sample and "1" or "0")
     end
+  end
 
-  elseif header_type == "b3-single" then
+  if conf_header_type == "b3-single" or found_header_type == "b3-single" then
     set_header("b3", fmt("%s-%s-%s-%s",
         to_hex(proxy_span.trace_id),
         to_hex(proxy_span.span_id),
         proxy_span.should_sample and "1" or "0",
       to_hex(proxy_span.parent_id)))
+  end
 
-  elseif header_type == "w3c" then
+  if conf_header_type == "w3c" or found_header_type == "w3c" then
     set_header("traceparent", fmt("00-%s-%s-%s",
         to_hex(proxy_span.trace_id),
         to_hex(proxy_span.span_id),

@@ -628,20 +628,21 @@ describe("http integration tests with zipkin server [#"
 
   describe("w3c traceparent header propagation", function()
     it("works on regular calls", function()
-      local trace_id = gen_trace_id()
+      local trace_id = gen_trace_id(16) -- w3c only admits 16-byte trace_ids
       local parent_id = gen_span_id()
 
       local r = proxy_client:get("/", {
         headers = {
           traceparent = fmt("00-%s-%s-01", trace_id, parent_id),
-          host = "mock-http-route"
+          host = "http-route"
         },
       })
       local body = assert.response(r).has.status(200)
       local json = cjson.decode(body)
       assert.matches("00%-" .. trace_id .. "%-%x+-01", json.headers.traceparent)
 
-      local balancer_span, proxy_span, request_span = wait_for_spans(trace_id, 3)
+      local balancer_span, proxy_span, request_span =
+        wait_for_spans(zipkin_client, 3, nil, trace_id)
 
       assert.equals(trace_id, request_span.traceId)
       assert.equals(parent_id, request_span.parentId)
@@ -651,7 +652,7 @@ describe("http integration tests with zipkin server [#"
     end)
 
     it("works on non-matched requests", function()
-      local trace_id = gen_trace_id()
+      local trace_id = gen_trace_id(16) -- w3c only admits 16-bit trace_ids
       local parent_id = gen_span_id()
 
       local r = proxy_client:get("/foobar", {
@@ -661,7 +662,8 @@ describe("http integration tests with zipkin server [#"
       })
       assert.response(r).has.status(404)
 
-      local proxy_span, request_span = wait_for_spans(trace_id, 2)
+      local proxy_span, request_span =
+        wait_for_spans(zipkin_client, 2, nil, trace_id)
 
       assert.equals(trace_id, request_span.traceId)
       assert.equals(parent_id, request_span.parentId)
