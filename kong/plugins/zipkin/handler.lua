@@ -1,9 +1,7 @@
 local new_zipkin_reporter = require "kong.plugins.zipkin.reporter".new
 local new_span = require "kong.plugins.zipkin.span".new
-local to_hex = require "resty.string".to_hex
-local parse_http_req_headers = require "kong.plugins.zipkin.parse_http_req_headers"
 local utils = require "kong.tools.utils"
-
+local tracing_headers = require "kong.plugins.zipkin.tracing_headers"
 
 local subsystem = ngx.config.subsystem
 local fmt = string.format
@@ -105,7 +103,7 @@ if subsystem == "http" then
     local req = kong.request
 
     local header_type, trace_id, span_id, parent_id, should_sample, baggage =
-      parse_http_req_headers(req.get_headers())
+      tracing_headers.parse(req.get_headers())
     local method = req.get_method()
 
     if should_sample == nil then
@@ -162,43 +160,7 @@ if subsystem == "http" then
       or ngx_now_mu()
     get_or_add_proxy_span(zipkin, access_start)
 
-    -- Want to send headers to upstream
-    local proxy_span = zipkin.proxy_span
-    local set_header = kong.service.request.set_header
-
-    local header_type = zipkin.header_type
-
-    if header_type == nil or header_type == "b3" then
-      set_header("x-b3-traceid", to_hex(proxy_span.trace_id))
-      set_header("x-b3-spanid", to_hex(proxy_span.span_id))
-      if proxy_span.parent_id then
-        set_header("x-b3-parentspanid", to_hex(proxy_span.parent_id))
-      end
-      local Flags = kong.request.get_header("x-b3-flags") -- Get from request headers
-      if Flags then
-        set_header("x-b3-flags", Flags)
-      else
-        set_header("x-b3-sampled", proxy_span.should_sample and "1" or "0")
-      end
-
-    elseif header_type == "b3-single" then
-      set_header("b3", fmt("%s-%s-%s-%s",
-                            to_hex(proxy_span.trace_id),
-                            to_hex(proxy_span.span_id),
-                            proxy_span.should_sample and "1" or "0",
-                            to_hex(proxy_span.parent_id)))
-
-    elseif header_type == "w3c" then
-      set_header("traceparent", fmt("00-%s-%s-%s",
-                                    to_hex(proxy_span.trace_id),
-                                    to_hex(proxy_span.span_id),
-                                    proxy_span.should_sample and "01" or "00"))
-    end
-
-    for key, value in proxy_span:each_baggage_item() do
-      -- XXX: https://github.com/opentracing/specification/issues/117
-      set_header("uberctx-"..key, ngx.escape_uri(value))
-    end
+    tracing_headers.set(zipkin.header_type, zipkin.proxy_span)
   end
 
 

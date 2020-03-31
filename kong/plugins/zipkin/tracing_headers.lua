@@ -1,7 +1,10 @@
+local to_hex = require "resty.string".to_hex
+
 local unescape_uri = ngx.unescape_uri
 local char = string.char
 local match = string.match
 local gsub = string.gsub
+local fmt = string.format
 
 
 local baggage_mt = {
@@ -249,7 +252,7 @@ local function find_header_type(headers)
 end
 
 
-local function parse_http_req_headers(headers)
+local function parse(headers)
   -- Check for B3 headers first
   local header_type, composed_header = find_header_type(headers)
   local trace_id, span_id, parent_id, should_sample
@@ -270,4 +273,45 @@ local function parse_http_req_headers(headers)
 end
 
 
-return parse_http_req_headers
+local function set(header_type, proxy_span)
+  local set_header = kong.service.request.set_header
+
+  if header_type == nil or header_type == "b3" then
+    set_header("x-b3-traceid", to_hex(proxy_span.trace_id))
+    set_header("x-b3-spanid", to_hex(proxy_span.span_id))
+    if proxy_span.parent_id then
+      set_header("x-b3-parentspanid", to_hex(proxy_span.parent_id))
+    end
+    local Flags = kong.request.get_header("x-b3-flags") -- Get from request headers
+    if Flags then
+      set_header("x-b3-flags", Flags)
+    else
+      set_header("x-b3-sampled", proxy_span.should_sample and "1" or "0")
+    end
+
+  elseif header_type == "b3-single" then
+    set_header("b3", fmt("%s-%s-%s-%s",
+        to_hex(proxy_span.trace_id),
+        to_hex(proxy_span.span_id),
+        proxy_span.should_sample and "1" or "0",
+      to_hex(proxy_span.parent_id)))
+
+  elseif header_type == "w3c" then
+    set_header("traceparent", fmt("00-%s-%s-%s",
+        to_hex(proxy_span.trace_id),
+        to_hex(proxy_span.span_id),
+      proxy_span.should_sample and "01" or "00"))
+  end
+
+  for key, value in proxy_span:each_baggage_item() do
+    -- XXX: https://github.com/opentracing/specification/issues/117
+    set_header("uberctx-"..key, ngx.escape_uri(value))
+  end
+end
+
+
+return {
+  parse = parse,
+  set = set,
+  from_hex = from_hex,
+}
